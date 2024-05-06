@@ -1,2 +1,3 @@
 ### Apero
-Tool to invite friends to events by mail, WhatsApp, etc... in several languages
+Tool to invite friends to events by mail, WhatsApp, SMS, etc... 
+in several languages
