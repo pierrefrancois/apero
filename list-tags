@@ -1,0 +1,11 @@
+#!/bin/bash
+
+friends_file="$1"
+
+if [ -z "$friends_file" ] ; then
+  echo "$0: missing name of CSV file <friends_file>"
+  exit 1
+fi
+
+mlr --csv cut -f tags "$friends_file" | \
+  sed 's/\#/\n/g' | sed '/^ *$/d' | sort -u

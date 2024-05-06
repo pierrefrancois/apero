@@ -1,0 +1,405 @@
+#!/usr/bin/php
+<?php
+
+require_once 'vendor/smarty/smarty/libs/Smarty.class.php';
+
+define("TIMEOUTSEC", 2);
+
+$debug = false;
+$no_sms = false;
+$no_mail = false;
+$no_whatsapp = false;
+
+$tag = "";
+
+$message_field = "message";
+$lang_field = "lang";
+$subject_field = "subject";
+$tags_field = "tags";
+$debug_address = "";
+
+$command = basename (array_shift($argv)); 
+
+// from now on, $argv only contains the arguments without the command
+
+while ((count ($argv) > 0) && (substr ($argv[0], 0, 2) == "--")) {
+  if (str_contains ($argv[0], "=")) {
+    list ($option_name, $option_value) = explode ("=", $argv[0]);
+  } else {
+    $option_name = $argv[0];
+  }
+
+  switch ($option_name) {
+    case "--help":
+      usage ();
+      echo "More explanation on how this program works (to fulfill).\n";
+      exit;
+    case "--tag":
+      $tag = $option_value;
+      array_shift($argv);
+      break;
+    case "--debug": // output is verbose
+      $debug = true;
+      array_shift($argv);
+      break;
+    case "--debug-address": // messages are sent only to this addresss
+      $debug_address = $option_value;
+      array_shift($argv);
+      break; 
+    case "--onlymail":
+      $no_whatsapp = 1;
+      $no_sms = 1;
+      array_shift($argv);
+      break;
+    case "--onlysms":
+      $no_whatsapp = 1;
+      $no_mail = 1;
+      array_shift($argv);
+      break;
+    case "--onlywhatsapp":
+      $no_sms = 1;
+      $no_mail = 1;
+      array_shift($argv);
+      break;
+    case "--message-field":
+      $message_field = $option_value;
+      array_shift($argv);
+      break;
+    case "--language-field":
+      $lang_field = $option_value;
+      array_shift($argv);
+      break;
+    case "--subject-field":
+      $subject_field = $option_value;
+      array_shift($argv);
+      break;
+    case "--tags-field":
+      $tags_field = $option_value;
+      array_shift($argv);
+      break;
+    default:
+      die ("$command: unknown option " . $argv[0] . "\n"); 
+  }
+}
+
+$friends_file_name = array_shift($argv);
+$event_file_name = array_shift($argv);
+
+if ($debug) {
+  echo "\$command           = '$command'\n";
+  echo "\$tag               = '$tag'\n";
+  echo "\$friends_file_name = '$friends_file_name'\n";
+  echo "\$event_file_name   = '$event_file_name'\n";
+  echo "\$debug             is set\n";
+  echo "\$debug_address     = '$debug_address'\n";
+  if ($no_sms) {
+    echo "\$no sms will be sent\n";
+  }
+  if ($no_mail) {
+    echo "\$no mail will be sent\n";
+  }
+  if ($no_whatsapp) {
+    echo "\$no whatsapp will be sent\n";
+  }
+  echo "\$message_field     = '$message_field'\n";
+  echo "\$lang_field        = '$lang_field'\n";
+  echo "\$subject_field     = '$subject_field'\n";
+  echo "\$tags_field        = '$tags_field'\n";
+}
+
+if ($no_sms && $no_mail && $no_whatsapp) {
+  // if several --only* options were selected, all the boolean $no* variables
+  // will be set and no message will be sent, which is an error
+  die ("$command: the options '--onlymail', '--onlysms' " . 
+    "or '--onlywhatsapp' cannot be used together.\n");
+}
+
+check_args ($friends_file_name, $event_file_name);
+
+// Only one of the next sendsms implementation is allowed
+#require "sim-ubuntutouch.php";
+#require "sim-android-shellms.php";
+require "sim-android-httpsms.php";
+
+function getcsvfile ($filename) {
+    global $command;
+
+    $a = array ();
+    $fp = fopen ($filename, "r");
+    $line = 0;
+
+    $header = fgetcsv($fp);
+    $nh = count ($header);
+    while ($row = fgetcsv($fp)) {
+        $line++;
+        if (($nr = count ($row)) != $nh) {
+            echo $command . 
+                ": expecting $nh comma separated values per row in file " .
+                $filename . ",\n found $nr such values in record #$line "
+                . "(line " . ($line + 1) . " of file $filename)\n";
+                die;
+        }
+        $a[] = array_combine($header, stripslashes_deep ($row));
+    }
+    return $a;
+}
+
+function sendmessage ($message, $subject, $name, $familyname, $address) {
+  global $debug, $debug_address, $no_mail, $no_sms, $no_whatsapp;
+
+  if ($debug) {
+      $address = $debug_address;
+      $subject = "TESTING: " . $subject;
+  }
+  $fullname = trim ($name . " " . $familyname);
+
+  if ($address === "") return; 
+    
+  list ($protocol, $destination) = explode (":", $address);
+
+  switch ($protocol) {
+      case 'sms':
+        if (! $no_sms) {
+          sendsms ($message, $destination, $fullname); 
+        }
+        break;
+      case 'mailto':
+        if (! $no_mail) {
+          sendemail ($message, $subject, $fullname, $destination);
+        }
+        break;
+      case 'whatsapp':
+        if (! $no_whatsapp) {
+          sendwhatsapp ($message, $destination, $fullname);
+        }
+  }
+}
+
+function sendemail ($m, $s, $toname, $tomail) {
+
+    global $smtpshost, $smtpsport, $smtpsuser, $smtpspass;
+    global $from1stname, $fromname, $frommail;
+    global $command, $debug;
+
+    $shell_output = array();
+
+    // should replace utf-8 chars missing in iso_8859_1 by an equivalent
+    //  happens with: €, opening and closing quote, etc.
+
+    $to_unicode = "=?utf-8?B?" . base64_encode ($toname) . 
+        "?= <" . $tomail . ">";
+    $s_unicode = "=?utf-8?B?" . base64_encode ($s) . "?=";
+    $from_unicode = "=?utf-8?B?" . 
+        base64_encode ($from1stname . " " . $fromname) .
+        "?= <" . $frommail . ">";
+    $m = addcslashes($m, '\\"');
+
+    echo "$command: sending an email to $toname <$tomail>,\n" .
+     " with subject '$s'.\n";
+    $commandstring = "/usr/bin/sendemail " .
+	      "-t  \"" . $to_unicode . "\" " .
+        "-f  \"" . $from_unicode . "\" " .
+        "-cc \"" . $from_unicode . "\" " .
+        "-u  \"" . $s_unicode . "\" " .
+        "-m  \"" . $m . "\" " .
+        "-o message-charset=utf8 " .
+        "-s  \"" . $smtpshost . ":" . $smtpsport . "\" " .
+        "-xu \"" . $smtpsuser . "\" " .
+        "-xp \"" . $smtpspass . "\"";
+
+    if ($debug) echo ($commandstring . "\n");
+
+    if ($tomail == "") {
+      echo "Missing '--debug-address=mailto:...' " .
+        "option with '--debug' option\n";
+      return;
+    }
+    
+    exec ($commandstring, $shell_output, $r);
+
+    if ($debug) echo "Value returned by shell: $r (0 means no error)\n";
+
+    if ($r !== 0) 
+      die ($commandstring . ": Couldn't execute shell command.\n" .
+        " Output of shell:\n" . $shell_output);
+}
+
+function sendwhatsapp ($m, $userid, $name) {
+  global $command, $debug, $debug_address;
+  
+  echo "$command: sending a WhatsApp message to $name [$userid].\n";
+
+  $m = addcslashes($m, '\\"');
+
+  $commandstring = 'npx mudslide send ' . $userid . ' "' . $m . '"';
+
+  if ($debug) echo ($commandstring . "\n");
+
+  if ($userid == "") {
+    echo "No '--debug-address=whatsapp:...' option with '--debug' option\n";
+    return;
+  }
+  exec ($commandstring, $shell_output, $r);
+    
+  if ($debug) echo "Value returned by shell: $r (0 means no error)\n";
+
+  if ($r !== 0) {
+    die ($commandstring . ": Couldn't execute shell command.\n" .
+      " Output of shell:\n" . $shell_output);
+    }
+
+}
+
+function configure ($configfile) {
+    global $smtpshost, $smtpsport, $smtpsuser, $smtpspass;
+    global $from1stname, $fromname, $frommail;
+    // global $ssh_host, $ssh_port, $ssh_key;
+    global $smsfrom, $smsapikey;
+
+    $xmldoc = new DOMDocument();
+    $xmldoc->load($configfile);
+
+    $smtpshost = query_config ('/config/smtp/server-host', $xmldoc);
+    $smtpsport = query_config ('/config/smtp/server-port', $xmldoc);
+    $smtpsuser = query_config ('/config/smtp/server-id', $xmldoc);
+    $smtpspass = query_config ('/config/smtp/server-pw', $xmldoc);
+    $from1stname = query_config ('/config/from/firstname', $xmldoc);
+    $fromname = query_config ('/config/from/name', $xmldoc);
+    $frommail = query_config ('/config/from/mail', $xmldoc);
+    // $ssh_host = query_config ('/config/ssh_to_sim_device/host', $xmldoc);
+    // $ssh_port = query_config ('/config/ssh_to_sim_device/port', $xmldoc);
+    // $ssh_key = query_config ('/config/ssh_to_sim_device/private-key', $xmldoc);
+    $smsfrom = query_config ('/config/httpsms/sms-from-number', $xmldoc);
+    $smsapikey = query_config ('/config/httpsms/key', $xmldoc);
+}
+
+function query_config ($xpath, $xml) {
+    $xpathvar = new Domxpath($xml);
+
+    $queryResult = $xpathvar->query($xpath);
+    return $queryResult[0]->textContent;
+}
+
+function trace ($msg, $var) {
+  global $debug;
+
+  if ($debug) {
+    echo $msg;
+    var_dump ($var);
+  }
+
+}
+
+function usage () {
+  global $command;
+
+  echo "$command: usage is: $command [ OPTIONS ] " .
+      "<friends-file.csv> <event-file.csv>\n" .
+      "  where OPTIONS can be '--debug', '--debugaddress=<address>',\n" .
+      "  '--tag=<tag>',\n" .
+      "  '--onlysms', '--onlymail', '--onlywhatsapp',\n" .
+      "  '--message-field=<name-of-header-for-message>',\n" .
+      "  '--language-field=<name-of-header-for-language>',\n" .
+      "  '--subject-field=<name-of-header-for-subject>',\n" .
+      "  '--tags-field=<name-of-header-for-tags>',\n" .
+      "The <tag> must not be preceded by the '#' char.\n";
+}
+
+function check_args ($arg1, $arg2) {
+  global $command;
+
+  if ($arg2 == "") {
+    usage ();
+    die;
+  }
+  if (!file_exists ($arg1)) {
+    die ("$command: couldn't find any file '$arg1'\n");
+  }
+  if (!file_exists ($arg2)) {
+    die ("$command: couldn't find second file '$arg2'\n");
+  }
+}
+
+function stripslashes_deep($value) {
+
+    $value = is_array($value) ?
+                array_map('stripslashes_deep', $value) :
+                stripslashes($value);
+
+    return $value;
+}
+
+function apply_smarty ($message, $friend, $language, $event) {
+    global $debug, $message_field, $lang_field;
+
+    // Next hard coded list is system dependent. It should be recoded.
+    static $locale = array (
+      'fr' => "fr_BE.UTF-8",
+      'nl' => "nl_BE.UTF-8",
+      'es' => "es_ES.UTF-8",
+      'en' => "en_GB.UTF-8"
+    ); 
+  
+    setlocale (LC_TIME, $locale[$language]);
+    $smarty_message = new Smarty();
+
+    if ($debug) echo "Entering apply_smarty with next variables:\n";
+    foreach ($friend as $name => $value) {
+        $smarty_message->assign($name, $value);
+        if ($debug) echo "-assigned '{$value}' to \${$name}.\n";
+    }
+
+    foreach ($event as $name => $value) {
+      if (($name != $lang_field) && ($name != $message_field)) {
+        $smarty_message->assign($name, $value);
+        if ($debug) echo "+assigned '{$value}' to \${$name}.\n";
+      }
+    }
+
+    return $smarty_message->fetch('string:' . $message);
+}
+
+configure ('config.xml');
+
+$friends = getcsvfile ($friends_file_name);
+$fields = array_keys ($friends[0]);
+
+// if $tag is set, check whether the field $tags_field is present or not
+if (($tag != "") && (in_array($tags_field, $fields) === false)) {
+    die ("$command: " .
+        "missing '$tags_field' header in first line of '$friends_file_name'\n");
+}
+
+$event = getcsvfile ($event_file_name);
+
+foreach ($friends as $friend) {
+    // if tag is set, skip friends not having the correct tag set
+    if (($tag != "") && 
+      (stripos ($friend[$tags_field] . "#", "#" . $tag . "#") === false))
+	      continue;
+
+    $l = $friend[$lang_field];
+    // search for the version of the event in the corresponding language
+    $eventversion = null;
+    foreach ($event as $version) {
+        if ($version[$lang_field] === $l) {
+            $eventversion = $version;
+            break;
+        }
+    }
+    if ($eventversion === null) {
+        echo "$command: couldn't find event version " .
+            "with $lang_field = '$l' for " .
+            $friend['name'] . " " . $friend['familyname'] . ".\n";
+        continue;
+    }
+
+    $message = apply_smarty ($eventversion[$message_field], $friend, $l, 
+      $eventversion);
+    $subject = apply_smarty ($eventversion[$subject_field], $friend, $l, 
+      $eventversion);
+
+    sendmessage ($message, $subject, 
+        $friend['name'], $friend['familyname'], $friend['address']);
+
+}
