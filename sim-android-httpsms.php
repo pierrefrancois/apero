@@ -1,7 +1,7 @@
 <?php
 
 function sendsms ($m, $to, $n) {
-  global $smsfrom, $smsapikey;
+  global $smsfrom, $smsapikey, $debug;
 
   echo "About to send an sms to $to [$n]\n";
     
@@ -22,7 +22,10 @@ function sendsms ($m, $to, $n) {
   $context  = stream_context_create( $options );
   $result = file_get_contents( "https://api.httpsms.com/v1/messages/send", false, $context );
 
-  // echo $result . "\n"; 
+  if ($debug) {
+    echo "Result of the execution of sendsms:\n";
+    echo $result . "\n"; 
+  }
 }
 
 
